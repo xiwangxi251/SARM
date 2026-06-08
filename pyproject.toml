@@ -8,9 +8,9 @@ license = { file = "LICENSE" }
 
 dependencies = [
   "torch==2.9.0",
-  "torchvision",
-  "torchaudio",
-  "torchcodec==0.4",
+  "torchvision==0.24.0",
+  "torchaudio==2.9.0",
+  "torchcodec==0.4; platform_system != 'Windows'",
   "hydra-core==1.2.0",
   "faker>=24.0.0",
   "wandb==0.13.3",
@@ -49,8 +49,16 @@ dev = [
 [tool.uv]
 override-dependencies = []
 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
+torch = { index = "pytorch-cu128", marker = "platform_system == 'Windows' or platform_system == 'Linux'" }
+torchvision = { index = "pytorch-cu128", marker = "platform_system == 'Windows' or platform_system == 'Linux'" }
+torchaudio = { index = "pytorch-cu128", marker = "platform_system == 'Windows' or platform_system == 'Linux'" }
 
 [tool.uv.workspace]
 members = ["packages/*"]

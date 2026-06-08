@@ -1,0 +1,82 @@
+_target_: workspace.b1k_rewind_ws.B1KReWiNDWorkspace
+
+cfg:
+  general:
+    project_name: "reward_b1k_rewind"
+    task_name: "turning_on_radio"
+    expert_root: 'D:\behavior\behavior_224_rgb'
+    rft_root: 'C:\Users\27642\Desktop\behavior\behavior-1k-rl\dataset\rft_dataset_from_outputs4'
+    camera_names: [observation.images.rgb.head]
+    sample_weights: [0.4, 0.6]
+    validation_split_seed: 42
+    validation_episode_ratio: 0.1666666667
+    seed: 42
+    device: "cuda"
+    use_wandb: true
+
+  b1k:
+    chunk_streaming_using_keyframe: false
+    temporal_all_windows_per_chunk: false
+    use_dtw_progress: false
+
+  dataloader:
+    batch_size: 32
+    num_workers: 4
+    shuffle: true
+    pin_memory: true
+    persistent_workers: true
+
+  val_dataloader:
+    batch_size: 16
+    num_workers: 4
+    shuffle: false
+    pin_memory: true
+    persistent_workers: true
+
+  eval_dataloader:
+    batch_size: 16
+    num_workers: 4
+    shuffle: false
+    pin_memory: true
+    persistent_workers: true
+
+  encoders:
+    vision_ckpt: "openai/clip-vit-base-patch32"
+    text_ckpt: "openai/clip-vit-base-patch32"
+
+  model:
+    d_model: 768
+    n_layers: 8
+    n_heads: 12
+    dropout: 0.1
+    n_obs_steps: 4
+    max_rewind_steps: 4
+    frame_gap: 30
+    state_dim: 23
+    no_state: false
+    resume_training: false
+    model_path: ""
+
+  optim:
+    lr: 5e-5
+    weight_decay: 5.0e-3
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    warmup_steps: 1000
+    total_steps: 100000
+
+  train:
+    num_epochs: 2
+    grad_clip: 1.0
+    log_every: 50
+    eval_every: 1
+    save_every: 5000
+
+  eval:
+    ckpt_path: "reward_b1k_rewind/turning_on_radio/checkpoints"
+    reward_model_name: "reward_best.pt"
+    output_dir: "reward_b1k_rewind/turning_on_radio/b1k_json"
+    output_suffix: "_rewind_task0"
+    export_all_windows: false
+    advantage_n_step: 30
+    target_positive_ratio: 0.3
