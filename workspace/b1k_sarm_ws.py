@@ -198,7 +198,6 @@ class B1KSARMWorkspace(B1KBaseWorkspace):
 
         expected_series: dict[str, dict[str, float]] = {}
         raw_series: dict[str, dict[str, float]] = {}
-        denominator = float(cfg.eval.progress_denominator)
         last_idx = cfg.model.n_obs_steps
 
         with torch.no_grad():
@@ -210,7 +209,8 @@ class B1KSARMWorkspace(B1KBaseWorkspace):
                 stage_idx = stage_logits.argmax(dim=-1)
                 stage_emb = F.one_hot(stage_idx, num_classes=cfg.model.num_classes).float().unsqueeze(1)
                 subtask_pred = subtask_model(image_emb, lang_emb, state, lengths, stage_emb, scheme="sparse")
-                expected = torch.clamp((stage_idx.float() + subtask_pred) / denominator, 0.0, 1.0)
+                stage_sum = batch["stage_sum"].to(self.device).float().clamp_min(1.0)
+                expected = torch.clamp((stage_idx.float() + subtask_pred) / stage_sum, 0.0, 1.0)
 
                 for row in range(expected.shape[0]):
                     ep = str(int(batch["ep_idx"][row, last_idx].item()))

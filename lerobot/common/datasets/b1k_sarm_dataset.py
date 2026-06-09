@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 
 from lerobot.common.datasets.b1k_local_dataset import (
@@ -30,8 +31,10 @@ class B1KSARMSequenceDataset(Dataset):
         chunk_streaming_using_keyframe: bool = True,
         temporal_all_windows_per_chunk: bool = False,
         use_dtw_progress: bool = False,
+        image_size: int = 224,
+        eval_frame_gap: int | None = None,
     ) -> None:
-        del behavior_repo_root, chunk_streaming_using_keyframe
+        del behavior_repo_root
         self.source = source
         self.camera_names = list(camera_names)
         self.n_obs_steps = int(n_obs_steps)
@@ -39,6 +42,7 @@ class B1KSARMSequenceDataset(Dataset):
         self.max_rewind_steps = int(max_rewind_steps)
         self.sequence_len = self.n_obs_steps + 1
         self.use_dtw_progress = bool(use_dtw_progress)
+        self.image_size = int(image_size)
         self.dataset = B1KLocalTemporalDataset(
             source=source,
             camera_names=camera_names,
@@ -47,6 +51,7 @@ class B1KSARMSequenceDataset(Dataset):
             seed=seed,
             chunk_streaming_using_keyframe=chunk_streaming_using_keyframe,
             temporal_all_windows_per_chunk=temporal_all_windows_per_chunk,
+            eval_frame_gap=eval_frame_gap,
         )
 
     def __len__(self) -> int:
@@ -59,12 +64,60 @@ class B1KSARMSequenceDataset(Dataset):
         return np.asarray(value)
 
     @staticmethod
-    def _image_to_chw_tensor(image: Any) -> torch.Tensor:
+    def _resize_single_image_with_pad_pil(image: np.ndarray, height: int, width: int) -> np.ndarray:
+        original_dtype = image.dtype
+        float_range = None
+        if np.issubdtype(original_dtype, np.floating):
+            image_min = float(np.nanmin(image)) if image.size else 0.0
+            if image_min < 0.0:
+                float_range = "minus_one_to_one"
+                pil_array = np.clip((image + 1.0) * 127.5, 0, 255).astype(np.uint8)
+            else:
+                float_range = "zero_to_one"
+                pil_array = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+        else:
+            pil_array = image.astype(np.uint8, copy=False)
+
+        channels = pil_array.shape[-1]
+        pil_image = Image.fromarray(pil_array[..., 0] if channels == 1 else pil_array)
+        cur_width, cur_height = pil_image.size
+        if cur_width == width and cur_height == height:
+            resized_array = pil_array
+        else:
+            ratio = max(cur_width / width, cur_height / height)
+            resized_height = int(cur_height / ratio)
+            resized_width = int(cur_width / ratio)
+            resized_image = pil_image.resize((resized_width, resized_height), resample=Image.BILINEAR)
+            canvas = Image.new(resized_image.mode, (width, height), 0)
+            pad_height = max(0, int((height - resized_height) / 2))
+            pad_width = max(0, int((width - resized_width) / 2))
+            canvas.paste(resized_image, (pad_width, pad_height))
+            resized_array = np.asarray(canvas)
+            if channels == 1:
+                resized_array = resized_array[..., None]
+
+        if float_range == "minus_one_to_one":
+            return (resized_array.astype(np.float32) / 127.5 - 1.0).astype(original_dtype)
+        if float_range == "zero_to_one":
+            return (resized_array.astype(np.float32) / 255.0).astype(original_dtype)
+        return resized_array.astype(original_dtype, copy=False)
+
+    def _image_to_chw_tensor(self, image: Any) -> torch.Tensor:
         arr = B1KSARMSequenceDataset._to_numpy(image)
         if arr.ndim != 4:
             raise ValueError(f"Expected temporal image [T,H,W,C] or [T,C,H,W], got shape={arr.shape}")
         if arr.shape[-1] in (1, 3, 4):
             arr = np.moveaxis(arr, -1, 1)
+        arr = np.moveaxis(arr, 1, -1)
+        if arr.shape[-3:-1] != (self.image_size, self.image_size):
+            arr = np.stack(
+                [
+                    self._resize_single_image_with_pad_pil(frame, self.image_size, self.image_size)
+                    for frame in arr
+                ],
+                axis=0,
+            )
+        arr = np.moveaxis(arr, -1, 1)
         if arr.dtype == np.uint8:
             arr = arr.astype(np.float32) / 255.0
         else:
@@ -89,6 +142,7 @@ class B1KSARMSequenceDataset(Dataset):
                     "targets",
                     "total_progress",
                     "stage_token_index",
+                    "stage_sum",
                     "ep_idx",
                     "frame_idx",
                     "reward",
@@ -120,6 +174,7 @@ class B1KSARMSequenceDataset(Dataset):
             ("targets", torch.float32),
             ("total_progress", torch.float32),
             ("stage_token_index", torch.int64),
+            ("stage_sum", torch.int64),
             ("ep_idx", torch.int64),
             ("frame_idx", torch.int64),
             ("reward", torch.float32),
@@ -137,6 +192,7 @@ class B1KSARMSequenceDataset(Dataset):
         transformed = self.dataset[idx]
         state = torch.as_tensor(self._to_numpy(transformed["state"]), dtype=torch.float32)
         stage = torch.as_tensor(self._to_numpy(transformed["stage_token_index"]), dtype=torch.long)
+        stage_sum = torch.as_tensor(self._to_numpy(transformed["stage_sum"]), dtype=torch.long)
         inner = torch.as_tensor(self._to_numpy(transformed["progress_margin_target"]), dtype=torch.float32)
         total_progress = torch.as_tensor(self._to_numpy(transformed["progress_target"]), dtype=torch.float32)
         if self.use_dtw_progress:
@@ -150,6 +206,7 @@ class B1KSARMSequenceDataset(Dataset):
             "task": self.source.task_name,
             "state": state,
             "stage_token_index": stage,
+            "stage_sum": stage_sum,
             "frame_relative_indices": torch.linspace(0.0, 1.0, steps=self.sequence_len, dtype=torch.float32),
             "ep_idx": torch.as_tensor(self._to_numpy(transformed["ep_idx"]), dtype=torch.int64),
             "frame_idx": torch.as_tensor(self._to_numpy(transformed["frame_idx"]), dtype=torch.int64),
@@ -218,6 +275,7 @@ def collate_b1k_sarm(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "task": [b["task"] for b in batch],
         "state": torch.stack([b["state"] for b in batch]),
         "stage_token_index": torch.stack([b["stage_token_index"] for b in batch]),
+        "stage_sum": torch.stack([b["stage_sum"] for b in batch]),
         "frame_relative_indices": torch.stack([b["frame_relative_indices"] for b in batch]),
         "ep_idx": torch.stack([b["ep_idx"] for b in batch]),
         "frame_idx": torch.stack([b["frame_idx"] for b in batch]),

@@ -1,5 +1,9 @@
 _target_: workspace.b1k_rewind_ws.B1KReWiNDWorkspace
 
+hydra:
+  job:
+    chdir: false
+
 cfg:
   general:
     project_name: "reward_b1k_rewind"
@@ -12,7 +16,7 @@ cfg:
     validation_episode_ratio: 0.1666666667
     seed: 42
     device: "cuda"
-    use_wandb: true
+    use_wandb: false
 
   b1k:
     chunk_streaming_using_keyframe: false
@@ -52,6 +56,7 @@ cfg:
     n_obs_steps: 4
     max_rewind_steps: 4
     frame_gap: 30
+    image_size: 224
     state_dim: 23
     no_state: false
     resume_training: false
@@ -78,5 +83,6 @@ cfg:
     output_dir: "reward_b1k_rewind/turning_on_radio/b1k_json"
     output_suffix: "_rewind_task0"
     export_all_windows: false
+    eval_frame_gap: 10
     advantage_n_step: 30
     target_positive_ratio: 0.3

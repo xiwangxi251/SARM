@@ -64,12 +64,8 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
         validation_ratio=cfg.general.validation_episode_ratio,
     )
     sources = val_sources if for_eval else train_sources
-    if for_eval:
-        # Export should cover the same validation split. all_windows can be
-        # enabled to densify the per-episode JSON without changing the split.
-        all_windows = bool(getattr(cfg.eval, "export_all_windows", False))
-    else:
-        all_windows = bool(getattr(cfg.b1k, "temporal_all_windows_per_chunk", False))
+    all_windows = False if for_eval else bool(getattr(cfg.b1k, "temporal_all_windows_per_chunk", False))
+    eval_frame_gap = int(getattr(cfg.eval, "eval_frame_gap", 10)) if for_eval else None
     datasets = [
         B1KSARMSequenceDataset(
             behavior_repo_root=getattr(cfg.general, "behavior_repo_root", None),
@@ -82,6 +78,8 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
             chunk_streaming_using_keyframe=cfg.b1k.chunk_streaming_using_keyframe,
             temporal_all_windows_per_chunk=all_windows,
             use_dtw_progress=cfg.b1k.use_dtw_progress,
+            image_size=getattr(cfg.model, "image_size", 224),
+            eval_frame_gap=eval_frame_gap,
         )
         for source in sources
     ]
@@ -100,6 +98,7 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
             chunk_streaming_using_keyframe=cfg.b1k.chunk_streaming_using_keyframe,
             temporal_all_windows_per_chunk=bool(getattr(cfg.b1k, "temporal_all_windows_per_chunk", False)),
             use_dtw_progress=cfg.b1k.use_dtw_progress,
+            image_size=getattr(cfg.model, "image_size", 224),
         )
         for source in val_sources
     ]

@@ -88,6 +88,7 @@ class B1kInputs:
             "progress_loss_weight",
             "progress_margin_target",
             "stage_token_index",
+            "stage_sum",
         ):
             if key in data:
                 inputs[key] = data[key]

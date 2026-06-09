@@ -4,3 +4,10 @@ data/
 wandb/
 outputs/
 *.pdf
+*/checkpoints/
+reward_b1k_sarm/
+*.pt
+*.pt
+reward_b1k_sarm/
+reward_b1k_rewind/
+outputs/

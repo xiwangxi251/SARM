@@ -23,6 +23,11 @@ TASK_TEXT_BY_INDEX = {
     1: "Pick up the trash on the floor and put it in the trash can.",
 }
 
+TASK_PROGRESS_BIN_COUNTS = {
+    0: 3,
+    1: 4,
+}
+
 CAMERA_TO_B1K_KEY = {
     "observation.images.rgb.head": "observation/egocentric_camera",
     "observation.images.rgb.left_wrist": "observation/wrist_image_left",
@@ -181,22 +186,12 @@ def _expert_annotation_spec(root: Path, task_idx: int, ep_idx: int, episode_len:
     with (root / "annotations" / f"task-{task_idx:04d}" / f"episode_{ep_idx:08d}.json").open("r", encoding="utf-8") as f:
         annotation = json.load(f)
     if task_idx == 0:
-        matches = _matching_end_frames(
-            annotation.get("skill_annotation", []),
-            "skill_description",
-            {("move to",), ("pick up from",), ("press",)},
-            episode_len,
-        )
-        descriptions = [desc for desc, _ in matches]
-        if descriptions[:3] != [("move to",), ("pick up from",), ("press",)]:
-            raise ValueError(f"Task0 annotation has unexpected skill order: {descriptions}")
-        move_end = int(matches[0][1])
-        press_end = int(matches[2][1])
+        del annotation
         grasp = _task0_grasp_frame(root, ep_idx)
-        passive_close = _task0_passive_close_frame(root, ep_idx, grasp, press_end)
-        if passive_close is None:
-            return (move_end, grasp, press_end), (0.15, 0.5, 1.0), press_end
-        return (move_end, grasp, passive_close, press_end), (0.15, 0.5, 0.75, 1.0), press_end
+        terminal_frame = max(int(episode_len) - 1, 0)
+        if grasp < 0 or grasp > terminal_frame:
+            raise ValueError(f"Task0 grasp frame out of range: ep={ep_idx}, grasp={grasp}, episode_len={episode_len}")
+        return (grasp, terminal_frame), None, int(episode_len)
     if task_idx == 1:
         matches = _matching_end_frames(
             annotation.get("primitive_annotation", []),
@@ -269,7 +264,8 @@ def _payload_from_boundaries(boundaries, anchors, mask_end):
     stable = np.full(10, -1, dtype=np.int32)
     for idx, end in enumerate(boundaries):
         stable[idx] = int(end)
-    return stable, len(boundaries), np.asarray(anchors, dtype=np.float32), mask_end
+    anchor_array = None if anchors is None else np.asarray(anchors, dtype=np.float32)
+    return stable, len(boundaries), anchor_array, mask_end
 
 
 def _stage_token(stable: np.ndarray, final_bin: int, bin_count: int, frame_idx: int, task_idx: int) -> int:
@@ -336,6 +332,7 @@ class B1KLocalTemporalDataset(Dataset):
         seed: int,
         chunk_streaming_using_keyframe: bool = False,
         temporal_all_windows_per_chunk: bool = False,
+        eval_frame_gap: int | None = None,
     ):
         self.source = source
         self.root = Path(source.root).expanduser()
@@ -345,6 +342,7 @@ class B1KLocalTemporalDataset(Dataset):
         self.frame_gap = int(frame_gap)
         self.rng = random.Random(seed)
         self.chunk_streaming_using_keyframe = bool(chunk_streaming_using_keyframe)
+        self.eval_frame_gap = None if eval_frame_gap is None else int(eval_frame_gap)
         self.q_scores = _load_q_scores(self.root)
         self.lengths = _load_episode_lengths(self.root)
         self.episode_ids = _episode_ids_for_source(
@@ -364,6 +362,9 @@ class B1KLocalTemporalDataset(Dataset):
         windows = []
         for ep_idx in self.episode_ids:
             ep_len = self.lengths[int(ep_idx)]
+            if self.eval_frame_gap is not None:
+                windows.extend((ep_idx, current) for current in range(0, ep_len, self.eval_frame_gap))
+                continue
             max_start = ep_len - span - 1
             if max_start < 0:
                 continue
@@ -388,13 +389,17 @@ class B1KLocalTemporalDataset(Dataset):
         if ep_idx in self.cache:
             return self.cache[ep_idx]
         ep_len = self.lengths[int(ep_idx)]
+        bin_count = TASK_PROGRESS_BIN_COUNTS[self.task_idx]
         if self.is_rft:
-            stable, final_bin, anchors, mask_end = _rft_value_spec(self.root, self.task_idx, ep_idx, ep_len, 3 if self.task_idx == 0 else 4)
-            bin_count = 3 if self.task_idx == 0 else 4
+            stable, final_bin, anchors, mask_end = _rft_value_spec(self.root, self.task_idx, ep_idx, ep_len, bin_count)
         else:
             boundaries, anchors_tuple, mask_end = _expert_annotation_spec(self.root, self.task_idx, ep_idx, ep_len)
             stable, final_bin, anchors, mask_end = _payload_from_boundaries(boundaries, anchors_tuple, mask_end)
-            bin_count = len(boundaries) + 1
+            if len(boundaries) + 1 != bin_count:
+                raise ValueError(
+                    f"Expert progress bins do not match task config: task_idx={self.task_idx}, "
+                    f"boundaries={len(boundaries)}, expected_bin_count={bin_count}"
+                )
         payload = (stable, final_bin, bin_count, anchors, mask_end)
         self.cache[ep_idx] = payload
         return payload
@@ -402,12 +407,19 @@ class B1KLocalTemporalDataset(Dataset):
     def __getitem__(self, idx):
         ep_idx, chunk_start = self.windows[int(idx) % len(self.windows)]
         span = (self.sequence_len - 1) * self.frame_gap
-        if self.source.use_for_validation or not self.chunk_streaming_using_keyframe:
+        if self.eval_frame_gap is not None:
+            current = int(chunk_start)
+            frame_indices = [
+                max(0, current - (self.sequence_len - 1 - i) * self.frame_gap)
+                for i in range(self.sequence_len)
+            ]
+        elif self.source.use_for_validation or not self.chunk_streaming_using_keyframe:
             start = chunk_start
+            frame_indices = [int(start + i * self.frame_gap) for i in range(self.sequence_len)]
         else:
             max_offset = max(0, min(250, self.lengths[ep_idx] - chunk_start) - span - 1)
             start = chunk_start + self.rng.randint(0, max_offset)
-        frame_indices = [int(start + i * self.frame_gap) for i in range(self.sequence_len)]
+            frame_indices = [int(start + i * self.frame_gap) for i in range(self.sequence_len)]
         rows = _read_parquet_rows(_data_path(self.root, self.task_idx, ep_idx), frame_indices)
 
         raw = {
@@ -434,6 +446,7 @@ class B1KLocalTemporalDataset(Dataset):
             total.append(_total_progress(stable, final_bin, bin_count, frame_idx, self.lengths[ep_idx], anchors))
             progress_mask.append(False if mask_end is not None and frame_idx >= int(mask_end) else True)
         raw["stage_token_index"] = np.asarray(stage, dtype=np.int32)
+        raw["stage_sum"] = np.full((self.sequence_len,), max(int(bin_count) - 1, 1), dtype=np.int32)
         raw["progress_margin_target"] = np.asarray(inner, dtype=np.float32)
         raw["progress_target"] = np.asarray(total, dtype=np.float32)
         raw["progress_mask"] = np.asarray(progress_mask, dtype=np.bool_)
