@@ -1,6 +1,7 @@
 import json
 import math
 import random
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,22 @@ def _decode_video_frames(path: Path, frame_indices: list[int]) -> np.ndarray:
     return np.stack([frames[int(idx)] for idx in frame_indices], axis=0)
 
 
+def _decode_video_frame_range(path: Path, start_idx: int, end_idx: int) -> np.ndarray:
+    frames = []
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        for idx, frame in enumerate(container.decode(stream)):
+            if idx >= end_idx:
+                break
+            if idx >= start_idx:
+                frames.append(frame.to_ndarray(format="rgb24"))
+    if len(frames) != end_idx - start_idx:
+        raise IndexError(
+            f"Missing decoded frame range [{start_idx}, {end_idx}) from {path}; got {len(frames)} frames"
+        )
+    return np.stack(frames, axis=0)
+
+
 def _matching_end_frames(entries: list[dict], key: str, allowed: set[tuple[str, ...]], episode_len: int):
     matches = []
     for entry in entries:
@@ -337,6 +354,9 @@ class B1KLocalTemporalDataset(Dataset):
         chunk_streaming_using_keyframe: bool = False,
         temporal_all_windows_per_chunk: bool = False,
         eval_frame_gap: int | None = None,
+        stream_video_decode: bool = True,
+        video_chunk_size: int = 250,
+        video_cache_chunks: int = 4,
     ):
         self.source = source
         self.root = Path(source.root).expanduser()
@@ -347,6 +367,11 @@ class B1KLocalTemporalDataset(Dataset):
         self.rng = random.Random(seed)
         self.chunk_streaming_using_keyframe = bool(chunk_streaming_using_keyframe)
         self.eval_frame_gap = None if eval_frame_gap is None else int(eval_frame_gap)
+        self.stream_video_decode = bool(stream_video_decode)
+        self.video_chunk_size = int(video_chunk_size)
+        self.video_cache_chunks = max(0, int(video_cache_chunks))
+        if self.video_chunk_size <= 0:
+            raise ValueError(f"video_chunk_size must be > 0, got {self.video_chunk_size}")
         self.q_scores = _load_q_scores(self.root)
         self.lengths = _load_episode_lengths(self.root)
         self.episode_ids = _episode_ids_for_source(
@@ -359,6 +384,7 @@ class B1KLocalTemporalDataset(Dataset):
         self.is_rft = bool(self.q_scores) or "rft" in str(self.root).lower()
         self.inputs = B1kInputs()
         self.cache: dict[int, tuple[np.ndarray, int, int, np.ndarray | None, int | None]] = {}
+        self.video_cache: OrderedDict[tuple[str, int, int], np.ndarray] = OrderedDict()
         self.windows = self._build_windows(all_windows=temporal_all_windows_per_chunk)
 
     def _build_windows(self, *, all_windows: bool):
@@ -408,6 +434,38 @@ class B1KLocalTemporalDataset(Dataset):
         self.cache[ep_idx] = payload
         return payload
 
+    def _decode_video_frames(self, path: Path, frame_indices: list[int], episode_len: int) -> np.ndarray:
+        if not self.stream_video_decode or self.video_cache_chunks <= 0:
+            return _decode_video_frames(path, frame_indices)
+
+        chunks: dict[int, list[int]] = {}
+        for frame_idx in sorted(set(int(i) for i in frame_indices)):
+            if frame_idx < 0 or frame_idx >= episode_len:
+                raise IndexError(f"Frame {frame_idx} out of range [0, {episode_len}) for {path}")
+            chunk_start = (frame_idx // self.video_chunk_size) * self.video_chunk_size
+            chunks.setdefault(chunk_start, []).append(frame_idx)
+
+        chunk_arrays: dict[int, np.ndarray] = {}
+        for chunk_start in chunks:
+            chunk_end = min(chunk_start + self.video_chunk_size, int(episode_len))
+            cache_key = (str(path), int(chunk_start), int(chunk_end))
+            frames = self.video_cache.get(cache_key)
+            if frames is None:
+                frames = _decode_video_frame_range(path, chunk_start, chunk_end)
+                self.video_cache[cache_key] = frames
+                while len(self.video_cache) > self.video_cache_chunks:
+                    self.video_cache.popitem(last=False)
+            else:
+                self.video_cache.move_to_end(cache_key)
+            chunk_arrays[chunk_start] = frames
+
+        out = []
+        for frame_idx in frame_indices:
+            frame_idx = int(frame_idx)
+            chunk_start = (frame_idx // self.video_chunk_size) * self.video_chunk_size
+            out.append(chunk_arrays[chunk_start][frame_idx - chunk_start])
+        return np.stack(out, axis=0)
+
     def __getitem__(self, idx):
         ep_idx, chunk_start = self.windows[int(idx) % len(self.windows)]
         span = (self.sequence_len - 1) * self.frame_gap
@@ -433,10 +491,12 @@ class B1KLocalTemporalDataset(Dataset):
             "episode_index": rows["episode_index"],
             "index": rows["index"],
         }
-        for cam in ("observation.images.rgb.head", "observation.images.rgb.left_wrist", "observation.images.rgb.right_wrist"):
-            raw[CAMERA_TO_B1K_KEY[cam]] = _decode_video_frames(
+        episode_len = self.lengths[int(ep_idx)]
+        for cam in self.camera_names:
+            raw[CAMERA_TO_B1K_KEY[cam]] = self._decode_video_frames(
                 _video_path(self.root, self.task_idx, ep_idx, cam),
                 frame_indices,
+                episode_len,
             )
 
         stable, final_bin, bin_count, anchors, mask_end = self._value_payload(ep_idx)

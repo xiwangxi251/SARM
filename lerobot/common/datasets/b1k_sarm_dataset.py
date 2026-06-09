@@ -33,6 +33,9 @@ class B1KSARMSequenceDataset(Dataset):
         use_dtw_progress: bool = False,
         image_size: int = 224,
         eval_frame_gap: int | None = None,
+        stream_video_decode: bool = True,
+        video_chunk_size: int = 250,
+        video_cache_chunks: int = 4,
     ) -> None:
         del behavior_repo_root
         self.source = source
@@ -52,6 +55,9 @@ class B1KSARMSequenceDataset(Dataset):
             chunk_streaming_using_keyframe=chunk_streaming_using_keyframe,
             temporal_all_windows_per_chunk=temporal_all_windows_per_chunk,
             eval_frame_gap=eval_frame_gap,
+            stream_video_decode=stream_video_decode,
+            video_chunk_size=video_chunk_size,
+            video_cache_chunks=video_cache_chunks,
         )
 
     def __len__(self) -> int:

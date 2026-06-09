@@ -22,6 +22,9 @@ cfg:
     chunk_streaming_using_keyframe: false
     temporal_all_windows_per_chunk: false
     use_dtw_progress: false
+    stream_video_decode: true
+    video_chunk_size: 250
+    video_cache_chunks: 4
 
   dataloader:
     batch_size: 32

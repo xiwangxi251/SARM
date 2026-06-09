@@ -94,6 +94,9 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
             use_dtw_progress=cfg.b1k.use_dtw_progress,
             image_size=getattr(cfg.model, "image_size", 224),
             eval_frame_gap=eval_frame_gap,
+            stream_video_decode=bool(getattr(cfg.b1k, "stream_video_decode", True)),
+            video_chunk_size=int(getattr(cfg.b1k, "video_chunk_size", 250)),
+            video_cache_chunks=int(getattr(cfg.b1k, "video_cache_chunks", 4)),
         )
         for source in sources
     ]
@@ -113,6 +116,9 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
             temporal_all_windows_per_chunk=bool(getattr(cfg.b1k, "temporal_all_windows_per_chunk", False)),
             use_dtw_progress=cfg.b1k.use_dtw_progress,
             image_size=getattr(cfg.model, "image_size", 224),
+            stream_video_decode=bool(getattr(cfg.b1k, "stream_video_decode", True)),
+            video_chunk_size=int(getattr(cfg.b1k, "video_chunk_size", 250)),
+            video_cache_chunks=int(getattr(cfg.b1k, "video_cache_chunks", 4)),
         )
         for source in val_sources
     ]

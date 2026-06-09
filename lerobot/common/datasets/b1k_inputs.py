@@ -62,17 +62,21 @@ class B1kInputs:
         self.proprioception_indices = proprioception_indices
 
     def __call__(self, data):
+        image_mapping = {
+            "observation/egocentric_camera": "base_0_rgb",
+            "observation/wrist_image_left": "left_wrist_0_rgb",
+            "observation/wrist_image_right": "right_wrist_0_rgb",
+        }
         inputs = {
             "state": extract_state_from_proprio(
                 data["observation/state"],
                 indices=self.proprioception_indices,
             ),
-            "image": {
-                "base_0_rgb": parse_b1k_image(data["observation/egocentric_camera"]),
-                "left_wrist_0_rgb": parse_b1k_image(data["observation/wrist_image_left"]),
-                "right_wrist_0_rgb": parse_b1k_image(data["observation/wrist_image_right"]),
-            },
+            "image": {},
         }
+        for raw_key, image_key in image_mapping.items():
+            if raw_key in data:
+                inputs["image"][image_key] = parse_b1k_image(data[raw_key])
         for key in (
             "task_index",
             "timestamp",
