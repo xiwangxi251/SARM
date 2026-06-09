@@ -1,5 +1,6 @@
 import json
 import os
+import dataclasses
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from lerobot.common.datasets.b1k_sarm_dataset import (
     behavior_source_configs,
     collate_b1k_sarm,
 )
+from lerobot.common.datasets.b1k_local_dataset import _episode_ids_for_source, _load_q_scores
 from models.clip_encoder import FrozenCLIPEncoder
 from utils.train_utils import save_ckpt, set_seed
 
@@ -28,6 +30,9 @@ TASK_TEXT = {
     "turning_on_radio": "turn on the radio",
     "picking_up_trash": "pick up the trash and place it in the bin",
 }
+
+
+_PRINTED_SPLITS: set[tuple[str, bool]] = set()
 
 
 def infinite_loader(dl):
@@ -63,7 +68,16 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
         validation_seed=cfg.general.validation_split_seed,
         validation_ratio=cfg.general.validation_episode_ratio,
     )
-    sources = val_sources if for_eval else train_sources
+    maybe_print_b1k_split(cfg, train_sources, val_sources, for_eval=for_eval)
+    if for_eval:
+        sources = [
+            dataclasses.replace(source, use_q_score_1_only=False)
+            if bool(getattr(cfg.eval, "include_failed_episodes", True))
+            else source
+            for source in val_sources
+        ]
+    else:
+        sources = train_sources
     all_windows = False if for_eval else bool(getattr(cfg.b1k, "temporal_all_windows_per_chunk", False))
     eval_frame_gap = int(getattr(cfg.eval, "eval_frame_gap", 10)) if for_eval else None
     datasets = [
@@ -105,6 +119,45 @@ def make_b1k_datasets(cfg, *, for_eval: bool = False):
     train = B1KMixtureDataset(datasets, sample_weights=list(cfg.general.sample_weights), seed=cfg.general.seed)
     val = B1KSequentialDataset(val_datasets)
     return train, val
+
+
+def maybe_print_b1k_split(cfg, train_sources, val_sources, *, for_eval: bool) -> None:
+    key = (str(cfg.general.task_name), bool(for_eval))
+    if key in _PRINTED_SPLITS:
+        return
+    _PRINTED_SPLITS.add(key)
+
+    print(
+        "[B1K Split] "
+        f"task={cfg.general.task_name} seed={cfg.general.validation_split_seed} "
+        f"ratio={cfg.general.validation_episode_ratio} "
+        "behavior_seed_rule=seed+dataset_index*10000+task_offset"
+    )
+    for split_name, sources in (("train", train_sources), ("val", val_sources)):
+        for source in sources:
+            root = Path(source.root)
+            q_scores = _load_q_scores(root)
+            selected_before_q = _episode_ids_for_source(
+                root,
+                source.task_name,
+                source.episodes,
+                q_scores,
+                False,
+            )
+            episode_ids = _episode_ids_for_source(
+                root,
+                source.task_name,
+                source.episodes,
+                q_scores,
+                source.use_q_score_1_only,
+            )
+            print(
+                "[B1K Split] "
+                f"{split_name}/{source.name}: count={len(episode_ids)} "
+                f"q_score_1_only={source.use_q_score_1_only} "
+                f"selected_before_q={selected_before_q} "
+                f"episodes={episode_ids}"
+            )
 
 
 def make_loaders(cfg):
@@ -219,25 +272,72 @@ def compute_advantages(expected_series, *, n_step: int, target_positive_ratio: f
     return advantages, masks, stats
 
 
+def series_metadata(series: dict[str, dict[str, float]], cfg) -> dict[str, Any]:
+    episodes = sorted(series.keys(), key=lambda item: int(item))
+    return {
+        "num_episodes": len(episodes),
+        "episodes": episodes,
+        "num_items": sum(len(values) for values in series.values()),
+        "eval_frame_gap": int(getattr(cfg.eval, "eval_frame_gap", 10)),
+        "task_name": str(cfg.general.task_name),
+        "validation_split_seed": int(cfg.general.validation_split_seed),
+        "validation_episode_ratio": float(cfg.general.validation_episode_ratio),
+        "include_failed_episodes": bool(getattr(cfg.eval, "include_failed_episodes", True)),
+        "note": "B1K export uses the RFT validation split. By default export includes failed episodes even if training filters q_score==1.",
+    }
+
+
+def interpolate_episode_series(series: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+    interpolated: dict[str, dict[str, float]] = {}
+    for ep, values in series.items():
+        points = sorted((int(frame), float(value)) for frame, value in values.items())
+        if not points:
+            interpolated[ep] = {}
+            continue
+        if len(points) == 1:
+            frame, value = points[0]
+            interpolated[ep] = {str(frame): value}
+            continue
+
+        ep_values: dict[str, float] = {}
+        for (left_frame, left_value), (right_frame, right_value) in zip(points[:-1], points[1:]):
+            width = max(right_frame - left_frame, 1)
+            for frame in range(left_frame, right_frame):
+                alpha = (frame - left_frame) / float(width)
+                ep_values[str(frame)] = left_value + alpha * (right_value - left_value)
+        last_frame, last_value = points[-1]
+        ep_values[str(last_frame)] = last_value
+        interpolated[ep] = ep_values
+    return interpolated
+
+
 def save_behavior_value_jsons(output_dir: Path, suffix: str, expected_series, raw_series, cfg):
     suffix = suffix or ""
-    expected_values = episode_series_to_frame_dict(expected_series)
-    raw_values = episode_series_to_frame_dict(raw_series)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_name in (
+        f"expected_values{suffix}.json",
+        f"model_raw_values{suffix}.json",
+        f"model_raw_values_series{suffix}.json",
+        f"advantages{suffix}.json",
+        f"advantage_masks{suffix}.json",
+    ):
+        stale_path = output_dir / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
+
     advantages, masks, stats = compute_advantages(
         expected_series,
         n_step=int(cfg.eval.advantage_n_step),
         target_positive_ratio=float(cfg.eval.target_positive_ratio),
     )
+    interpolated = interpolate_episode_series(expected_series)
 
-    write_json(output_dir / f"expected_values{suffix}.json", expected_values)
     write_json(output_dir / f"expected_values_series{suffix}.json", expected_series)
-    write_json(output_dir / f"model_raw_values{suffix}.json", raw_values)
-    write_json(output_dir / f"model_raw_values_series{suffix}.json", raw_series)
-    write_json(output_dir / f"advantages{suffix}.json", episode_series_to_frame_dict(advantages))
+    write_json(output_dir / f"expected_values_series{suffix}_interp.json", interpolated)
     write_json(output_dir / f"advantages_series{suffix}.json", advantages)
-    write_json(output_dir / f"advantage_masks{suffix}.json", episode_series_to_frame_dict(masks))
     write_json(output_dir / f"advantage_masks_series{suffix}.json", masks)
     write_json(output_dir / f"advantage_stats{suffix}.json", stats)
+    write_json(output_dir / f"export_metadata{suffix}.json", series_metadata(expected_series, cfg))
 
 
 class B1KBaseWorkspace:

@@ -1,4 +1,5 @@
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,7 +67,7 @@ def resolve_task_episode_ordinals(root: str | Path, task_name: str) -> list[int]
 def split_validation_ordinals(ordinals: list[int], *, ratio: float, seed: int) -> tuple[list[int], list[int]]:
     if not ordinals:
         raise ValueError("Cannot split an empty episode ordinal list.")
-    val_count = max(1, int(len(ordinals) * float(ratio)))
+    val_count = max(1, math.floor(len(ordinals) * float(ratio) + 0.5))
     if val_count >= len(ordinals):
         raise ValueError("Validation split would leave no training episodes.")
     shuffled = list(ordinals)
@@ -87,7 +88,10 @@ def behavior_source_configs(
 ) -> tuple[list[B1KSourceConfig], list[B1KSourceConfig]]:
     expert_ordinals = resolve_task_episode_ordinals(expert_root, task_name)
     rft_ordinals = resolve_task_episode_ordinals(rft_root, task_name)
-    rft_train, rft_val = split_validation_ordinals(rft_ordinals, ratio=validation_ratio, seed=validation_seed)
+    rft_dataset_index = 1
+    rft_task_offset = 0
+    rft_split_seed = int(validation_seed) + rft_dataset_index * 10_000 + rft_task_offset
+    rft_train, rft_val = split_validation_ordinals(rft_ordinals, ratio=validation_ratio, seed=rft_split_seed)
     rft_q1_only = task_name == "turning_on_radio"
     train = [
         B1KSourceConfig("expert", expert_root, "local/expert", task_name, {task_name: expert_ordinals}),

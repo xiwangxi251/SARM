@@ -86,5 +86,6 @@ cfg:
     output_suffix: "_sarm_task0"
     export_all_windows: false
     eval_frame_gap: 10
+    include_failed_episodes: true
     advantage_n_step: 30
     target_positive_ratio: 0.3
